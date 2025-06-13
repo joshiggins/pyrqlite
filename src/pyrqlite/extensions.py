@@ -155,6 +155,12 @@ def _convert_to_python(column_name, type_, parse_decltypes=False, parse_colnames
 
         # If parse_decltypes is enabled, use type_ to check for a registered converter
         if parse_decltypes:
+            ## From: https://github.com/python/cpython/blob/c72b6008e0578e334f962ee298279a23ba298856/Modules/_sqlite/cursor.c#L167
+            # /* Converter names are split at '(' and blanks.
+            #  * This allows 'INTEGER NOT NULL' to be treated as 'INTEGER' and
+            #  * 'NUMBER(10)' to be treated as 'NUMBER', for example.
+            #  * In other words, it will work as people expect it to work.*/
+            type_upper = type_upper.partition('(')[0].partition(' ')[0]
             if type_upper in converters:
                 converter = converters[type_upper]
 
