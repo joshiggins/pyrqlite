@@ -99,16 +99,21 @@ adapters = {
 adapters = {(type_, sqlite3.PrepareProtocol): val for type_, val in adapters.items()}
 _default_adapters = adapters.copy()
 
+_primitive_converters = {
+    'INTEGER': functools.partial(_null_wrapper, int),
+    'REAL': functools.partial(_null_wrapper, float),
+    'BLOB': lambda x: x,
+    'NULL': lambda x: None,
+    'DATE': lambda x: x.split('T')[0] if x is not None else None,
+    'DATETIME': lambda x: x.replace('T', ' ').rstrip('Z') if x is not None else None,
+    'TIMESTAMP': lambda x: x.replace('T', ' ').rstrip('Z') if x is not None else None,
+}
+
 converters = {
     'UNICODE': functools.partial(_null_wrapper, lambda x: x.decode('utf-8')),
-    'INTEGER': functools.partial(_null_wrapper, int),
     'BOOL': functools.partial(_null_wrapper, bool),
     'FLOAT': functools.partial(_null_wrapper, float),
-    'REAL': functools.partial(_null_wrapper, float),
-    'NULL': lambda x: None,
-    'BLOB': lambda x: x,
     'DATE': functools.partial(_null_wrapper, _convert_date),
-    'DATETIME': lambda x: x.replace('T', ' ').rstrip('Z') if x is not None else None,
     'TIMESTAMP': functools.partial(_null_wrapper, _convert_timestamp),
 }
 
@@ -142,26 +147,30 @@ def _convert_to_python(column_name, type_, parse_decltypes=False, parse_colnames
         elif all([slice.isdigit() for slice in column_name.partition('.')[::2]]):   # 3.14
             type_ = 'real'
 
-    if '[' in column_name and ']' in column_name and parse_colnames:
-        type_upper = column_name.upper().partition('[')[-1].partition(']')[0]
-        if type_upper in converters:
-            converter = converters[type_upper]
-
-    if not converter:
+    # Always pick primitive converters first based on the type_ parameter
+    if type_:
         type_upper = type_.upper()
+        if type_upper in _primitive_converters:
+            converter = _primitive_converters[type_upper]
+
+        # If parse_decltypes is enabled, use type_ to check for a registered converter
         if parse_decltypes:
-            ## From: https://github.com/python/cpython/blob/c72b6008e0578e334f962ee298279a23ba298856/Modules/_sqlite/cursor.c#L167
-            # /* Converter names are split at '(' and blanks.
-            #  * This allows 'INTEGER NOT NULL' to be treated as 'INTEGER' and
-            #  * 'NUMBER(10)' to be treated as 'NUMBER', for example.
-            #  * In other words, it will work as people expect it to work.*/
-            type_upper = type_upper.partition('(')[0].partition(' ')[0]
-        if type_upper in converters:
-            if type_upper in _native_converters or parse_decltypes:
+            if type_upper in converters:
                 converter = converters[type_upper]
+
+    # If parse_colnames is enabled, use column name to check for a registered converter
+    if parse_colnames:
+        if '[' in column_name and ']' in column_name:
+            type_from_col = column_name.upper().partition('[')[-1].partition(']')[0]
+            if type_from_col:
+                type_upper = type_from_col.upper()
+                if type_upper in converters:
+                    converter = converters[type_upper]
 
     if converter:
         if type_upper not in _native_converters:
+            # If the converter is not a native one, it will be decoded from base64
+            # before being passed to the converter
             converter = functools.partial(_decode_base64_converter, converter)
     elif not type_upper or _text_affinity_re.search(type_upper):
         # Python's sqlite3 module has a text_factory attribute which
