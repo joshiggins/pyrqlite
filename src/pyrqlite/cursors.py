@@ -1,4 +1,3 @@
-
 from __future__ import unicode_literals
 
 from collections import OrderedDict
@@ -159,14 +158,25 @@ class Cursor(object):
             raise ValueError(
                              "argument must be a string, not '{}'".format(type(operation).__name__))
 
-        operation = self._substitute_params(operation, parameters)
+        # Use the parameterization API instead of substituting parameters in the library here
+        operation = [operation]
+        if parameters is not None:
+            if isinstance(parameters, dict):
+                adapted_params = {key: _adapt_from_python(value) for key, value in parameters.items()}
+                operation.append(adapted_params)
+            else:
+                adapted_params = [_adapt_from_python(value) for value in parameters]
+                operation.extend(adapted_params)
 
-        command = self._get_sql_command(operation)
+        print("Executing operation:", json.dumps([operation]))
+
+        command = self._get_sql_command(operation[0])
         if command in ('SELECT', 'PRAGMA'):
-            params = {'q': operation}
+            params = {}
             if consistency:
                 params["level"] = consistency
-            payload = self._request("GET", "/db/query?" + _urlencode(params))
+            payload = self._request("POST", "/db/query?" + _urlencode(params), 
+                                    headers={'Content-Type': 'application/json'}, body=json.dumps([operation]))
         else:
             path = "/db/execute?transaction"
             if queue:
@@ -188,7 +198,7 @@ class Cursor(object):
             for item in results:
                 if 'error' in item:
                     logging.getLogger(__name__).error(json.dumps(item))
-                    raise Error(json.dumps(item))
+                    raise ProgrammingError(item['error'])
                 try:
                     rows_affected += item['rows_affected']
                 except KeyError:

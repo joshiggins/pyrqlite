@@ -39,7 +39,7 @@ if sys.version_info[0] >= 3:
             return "X'{}'".format(
                 codecs.encode(value, 'hex').decode('utf-8'))
 
-        return "'{}'".format(value.replace("'", "''"))
+        return value
 
     def _adapt_datetime(val):
         return val.isoformat(" ")
@@ -54,7 +54,7 @@ else:
                 return "X'{}'".format(
                     codecs.encode(value, 'hex').decode('utf-8'))
 
-        return "'{}'".format(value.replace("'", "''"))
+        return value
 
     def _adapt_datetime(val):
         return val.isoformat(b" ")
@@ -141,11 +141,20 @@ def _convert_to_python(column_name, type_, parse_decltypes=False, parse_colnames
     converter = None
     type_upper = None
 
-    if type_ == '':     # q="select 3.0" -> type='' column_name='3.0' value=3
+    # if type_ is blank try to infer the type from the column_name
+    # (only for primitive types)
+    # e.g. q="select 3.0" -> type='' column_name='3.0' value=3
+    if type_ == '':
         if column_name.isdigit():
             type_ = 'int'
         elif all([slice.isdigit() for slice in column_name.partition('.')[::2]]):   # 3.14
             type_ = 'real'
+
+    # if the column_name is a qmark or a named parameter, infer the type from the value
+    # (only for primitive types)
+    # e.g. q=[["select ?", "4.0"]] -> type='' column_name='?' value=4.0
+    if type_ == '' and (column_name.startswith('?') or column_name.startswith(':')):
+        raise NotImplementedError("dont have a way to get the value yet!")
 
     # Always pick primitive converters first based on the type_ parameter
     if type_:
@@ -216,7 +225,7 @@ def _adapt_from_python(value):
     if isinstance(adapted, (bytes, unicode)):
         adapted = _escape_string(adapted)
     elif adapted is None:
-        adapted = 'NULL'
+        adapted = None
     else:
         adapted = str(adapted)
 
