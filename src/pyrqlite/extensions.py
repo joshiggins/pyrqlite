@@ -14,6 +14,7 @@ import functools
 import re
 import sqlite3
 import sys
+import json
 
 from .exceptions import InterfaceError
 
@@ -25,37 +26,16 @@ PARSE_DECLTYPES = 1
 PARSE_COLNAMES = 2
 
 
-def _decoder(conv_func):
-    """ The Python sqlite3 interface returns always byte strings.
-        This function converts the received value to a regular string before
-        passing it to the receiver function.
-    """
-    return lambda s: conv_func(s.decode('utf-8'))
+def _adapt_bytes(value):
+    # Use byte array for the params API
+    if not isinstance(value, bytes):
+        value = value.encode('utf-8')
+    return list(value)
 
 if sys.version_info[0] >= 3:
-
-    def _escape_string(value):
-        if isinstance(value, bytes):
-            return "X'{}'".format(
-                codecs.encode(value, 'hex').decode('utf-8'))
-
-        return "'{}'".format(value.replace("'", "''"))
-
     def _adapt_datetime(val):
         return val.isoformat(" ")
 else:
-
-    def _escape_string(value):
-        if isinstance(value, bytes):
-            try:
-                value = value.decode('utf-8')
-            except UnicodeDecodeError:
-                # Encode as a BLOB literal containing hexadecimal data
-                return "X'{}'".format(
-                    codecs.encode(value, 'hex').decode('utf-8'))
-
-        return "'{}'".format(value.replace("'", "''"))
-
     def _adapt_datetime(val):
         return val.isoformat(b" ")
 
@@ -86,18 +66,42 @@ def _null_wrapper(converter, value):
 
 
 adapters = {
-    bytes: lambda x: x,
-    float: lambda x: x,
-    int: lambda x: x,
-    bool: int,
-    unicode: lambda x: x.encode('utf-8'),
-    type(None): lambda x: None,
+    bytes: _adapt_bytes,
+    unicode: _adapt_bytes,
     datetime.date: _adapt_date,
     datetime.datetime: _adapt_datetime,
-
 }
 adapters = {(type_, sqlite3.PrepareProtocol): val for type_, val in adapters.items()}
 _default_adapters = adapters.copy()
+
+
+class AdaptedJSONEncoder(json.JSONEncoder):
+    """JSON encoder for RQLite parameter API input"""
+    
+    def default(self, value):
+        if not isinstance(value, basestring):
+            adapter_key = (type(value), sqlite3.PrepareProtocol)
+            adapter = adapters.get(adapter_key)
+            try:
+                if adapter is None:
+                    # Fall back to _default_adapters, so that ObjectAdaptationTests
+                    # teardown will correctly restore the default state.
+                    adapter = _default_adapters[adapter_key]
+            except KeyError as e:
+                # No adapter registered. Let the object adapt itself via PEP-246.
+                # It has been rejected by the BDFL, but is still implemented
+                # on stdlib sqlite3 module even on Python 3 !!
+                if hasattr(value, '__adapt__'):
+                    return value.__adapt__(sqlite3.PrepareProtocol)
+                elif hasattr(value, '__conform__'):
+                    return value.__conform__(sqlite3.PrepareProtocol)
+                else:
+                    raise InterfaceError(e)
+            else:
+                return adapter(value)
+
+        return super().default(value)
+
 
 converters = {
     'UNICODE': functools.partial(_null_wrapper, lambda x: x.decode('utf-8')),
@@ -174,38 +178,8 @@ def _convert_to_python(column_name, type_, parse_decltypes=False, parse_colnames
 
 
 def _adapt_from_python(value):
-    if not isinstance(value, basestring):
-        adapter_key = (type(value), sqlite3.PrepareProtocol)
-        adapter = adapters.get(adapter_key)
-        try:
-            if adapter is None:
-                # Fall back to _default_adapters, so that ObjectAdaptationTests
-                # teardown will correctly restore the default state.
-                adapter = _default_adapters[adapter_key]
-        except KeyError as e:
-            # No adapter registered. Let the object adapt itself via PEP-246.
-            # It has been rejected by the BDFL, but is still implemented
-            # on stdlib sqlite3 module even on Python 3 !!
-            if hasattr(value, '__adapt__'):
-                adapted = value.__adapt__(sqlite3.PrepareProtocol)
-            elif hasattr(value, '__conform__'):
-                adapted = value.__conform__(sqlite3.PrepareProtocol)
-            else:
-                raise InterfaceError(e)
-        else:
-            adapted = adapter(value)
-    else:
-        adapted = value
-
-    # The adapter could had returned a string
-    if isinstance(adapted, (bytes, unicode)):
-        adapted = _escape_string(adapted)
-    elif adapted is None:
-        adapted = 'NULL'
-    else:
-        adapted = str(adapted)
-
-    return adapted
+    adapted_json = AdaptedJSONEncoder().encode(value)
+    return json.loads(adapted_json)
 
 def _column_stripper(column_name, parse_colnames=False):
     return column_name.partition(' ')[0] if parse_colnames else column_name
