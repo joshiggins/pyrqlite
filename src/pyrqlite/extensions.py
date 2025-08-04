@@ -62,6 +62,12 @@ else:
 def _adapt_date(val):
     return val.isoformat()
 
+def _adapt_bytes(value):
+    # Use byte array for the params API
+    if not isinstance(value, bytes):
+        value = value.encode('utf-8')
+    return list(value)
+
 def _convert_date(val):
     return datetime.date(*map(int, val.split('T')[0].split("-")))
 
@@ -85,19 +91,15 @@ def _null_wrapper(converter, value):
     return value
 
 
-adapters = {
-    bytes: lambda x: x,
-    float: lambda x: x,
-    int: lambda x: x,
-    bool: int,
-    unicode: lambda x: x.encode('utf-8'),
-    type(None): lambda x: None,
+# Adapters only need to adapt Python values before JSON serialization for the rqlite API.
+# Types that are already serialized in an acceptable way without an adapter
+# are not included anymore.
+_default_adapters = {
+    bytes: _adapt_bytes,
     datetime.date: _adapt_date,
     datetime.datetime: _adapt_datetime,
-
 }
-adapters = {(type_, sqlite3.PrepareProtocol): val for type_, val in adapters.items()}
-_default_adapters = adapters.copy()
+adapters = {}
 
 converters = {
     'UNICODE': functools.partial(_null_wrapper, lambda x: x.decode('utf-8')),
@@ -124,7 +126,7 @@ def register_converter(type_string, function):
 
 
 def register_adapter(type_, function):
-    adapters[(type_, sqlite3.PrepareProtocol)] = function
+    adapters[type_] = function
 
 
 def _convert_to_python(column_name, type_, parse_decltypes=False, parse_colnames=False):
@@ -175,37 +177,14 @@ def _convert_to_python(column_name, type_, parse_decltypes=False, parse_colnames
 
 def _adapt_from_python(value):
     if not isinstance(value, basestring):
-        adapter_key = (type(value), sqlite3.PrepareProtocol)
-        adapter = adapters.get(adapter_key)
-        try:
-            if adapter is None:
-                # Fall back to _default_adapters, so that ObjectAdaptationTests
-                # teardown will correctly restore the default state.
-                adapter = _default_adapters[adapter_key]
-        except KeyError as e:
-            # No adapter registered. Let the object adapt itself via PEP-246.
-            # It has been rejected by the BDFL, but is still implemented
-            # on stdlib sqlite3 module even on Python 3 !!
-            if hasattr(value, '__adapt__'):
-                adapted = value.__adapt__(sqlite3.PrepareProtocol)
-            elif hasattr(value, '__conform__'):
-                adapted = value.__conform__(sqlite3.PrepareProtocol)
-            else:
-                raise InterfaceError(e)
-        else:
-            adapted = adapter(value)
-    else:
-        adapted = value
+        adapter_key = type(value)
+        # Use default adapter first, then check for registered adapters
+        adapter = _default_adapters.get(adapter_key)
+        adapter = adapters.get(adapter_key, adapter)
+        if adapter:
+            return adapter(value)
 
-    # The adapter could had returned a string
-    if isinstance(adapted, (bytes, unicode)):
-        adapted = _escape_string(adapted)
-    elif adapted is None:
-        adapted = 'NULL'
-    else:
-        adapted = str(adapted)
-
-    return adapted
+    return value
 
 def _column_stripper(column_name, parse_colnames=False):
     return column_name.partition(' ')[0] if parse_colnames else column_name
